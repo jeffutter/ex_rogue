@@ -83,60 +83,81 @@ defmodule ExRogue.Map do
     # +2 for walls
     height = floor(size / width) + 2
 
-    x_max = map_width - width
-    y_max = map_height - height
+    x_max = map_width - width - 1
+    y_max = map_height - height - 1
 
-    left = Enum.random(0..x_max)
+    left = Enum.random(1..x_max)
     right = left + width - 1
-    top = Enum.random(0..y_max)
+    top = Enum.random(1..y_max)
     bottom = top + height - 1
 
     IO.inspect({width, height}, label: "WH")
     IO.inspect({left, right, top, bottom}, label: "Cords")
 
-    left..right
+    map
+    |> carve({left, top}, {right, bottom}, Room, id)
+    |> case do
+      {:ok, map} -> map
+      {:error, :collision} -> do_place_room(map, size, id, attempts - 1)
+    end
+  end
+
+  defp carve(%__MODULE__{} = map, {tx, ty}, {bx, by}, type, id) do
+    points =
+      for x <- tx..bx, y <- ty..by do
+        {x, y}
+      end
+
+    Enum.reduce_while(points, {:ok, map}, fn point, {:ok, map} ->
+      case carve(map, point, type, id) do
+        {:ok, map} -> {:cont, {:ok, map}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp carve(%__MODULE__{} = map, {x, y}, type, id) do
+    map_region(map, {x - 1, y - 1}, {x + 1, y + 1}, fn point, curr_value ->
+      case {point, curr_value} do
+        {{^x, ^y}, %Wall{}} -> {:ok, struct(type, %{id: id, position: {x, y}})}
+        {_point, tile} when not is_nil(tile) -> {:ok, tile}
+        {{^x, ^y}, nil} -> {:ok, struct(type, %{id: id, position: {x, y}})}
+        {{^x, ^y}, _} -> {:error, :collision}
+        _ -> {:ok, struct(Wall, %{id: id, position: {x, y}})}
+      end
+    end)
+  end
+
+  def map_region(%__MODULE__{} = map, {tx, ty}, {bx, by}, fun) do
+    tx..bx
     |> Enum.reduce_while({:ok, map}, fn x, {:ok, map} ->
-      top..bottom
+      ty..by
       |> Enum.reduce_while({:ok, map}, fn y, {:ok, map} ->
-        tile =
-          case {x, y} do
-            {x, _} when x == left ->
-              %Wall{id: id, position: {x, y}}
+        value = get(map, {x, y})
 
-            {x, _} when x == right ->
-              %Wall{id: id, position: {x, y}}
+        fun.({x, y}, value)
+        |> case do
+          {:ok, value} ->
+            {:cont, {:ok, update(map, {x, y}, value)}}
 
-            {_, y} when y == top ->
-              %Wall{id: id, position: {x, y}}
-
-            {_, y} when y == bottom ->
-              %Wall{id: id, position: {x, y}}
-
-            _ ->
-              %Room{id: id, position: {x, y}}
-          end
-
-        {old_val, map} = get_and_update(map, {x, y}, tile)
-
-        case {old_val, tile} do
-          {nil, _} -> {:cont, {:ok, map}}
-          {%Wall{}, %Wall{}} -> {:cont, {:ok, map}}
-          _ -> {:halt, :collision}
+          {:error, reason} ->
+            {:halt, {:error, reason}}
         end
       end)
       |> case do
         {:ok, map} -> {:cont, {:ok, map}}
-        :collision -> {:halt, :collision}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
-    |> case do
-      {:ok, map} -> map
-      :collision -> do_place_room(map, size, id, attempts - 1)
-    end
   end
 
   defp get(%__MODULE__{map: map}, {x, y}) do
     get_in(map, [Access.at(y), Access.at(x)])
+  end
+
+  defp update(%__MODULE__{map: data} = map, {x, y}, value) do
+    data = put_in(data, [Access.at(y), Access.at(x)], value)
+    %__MODULE__{map | map: data}
   end
 
   defp get_and_update(%__MODULE__{map: data} = map, {x, y}, value) do
@@ -159,8 +180,8 @@ defimpl Inspect, for: ExRogue.Map do
             for col <- row, into: "" do
               case col do
                 nil -> " "
-                %Room{} -> "R"
-                %Wall{} -> "W"
+                %Room{} -> "."
+                %Wall{} -> "#"
               end
             end
 
