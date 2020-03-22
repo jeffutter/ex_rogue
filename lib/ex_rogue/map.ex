@@ -13,7 +13,12 @@ defmodule ExRogue.Map do
     @type t :: %__MODULE__{id: integer, position: {integer, integer}}
   end
 
-  alias Tile.{Room, Wall}
+  defmodule Tile.Hall do
+    defstruct id: 0, position: {0, 0}
+    @type t :: %__MODULE__{id: integer, position: {integer, integer}}
+  end
+
+  alias Tile.{Hall, Room, Wall}
 
   def build(options \\ []) do
     width = Keyword.get(options, :width, 50)
@@ -22,7 +27,7 @@ defmodule ExRogue.Map do
     width
     |> new(height)
     |> place_rooms(options)
-    |> fill_space()
+    |> carve_halls()
   end
 
   def new(width, height) do
@@ -54,23 +59,105 @@ defmodule ExRogue.Map do
     do_place_room(map, size, id, attempts)
   end
 
-  def fill_space(%__MODULE__{width: width, height: height} = map) do
-    x_max = width - 1
-    y_max = height - 1
+  defp carve_halls(%__MODULE__{} = map) do
+    case find_empty(map) do
+      nil ->
+        map
 
-    data =
-      for y <- 0..y_max do
-        for x <- 0..x_max do
+      {_, _} = point ->
+        points = trace_hall(map, point)
+        id = System.unique_integer([:positive, :monotonic])
+
+        with {:ok, map} <- carve_points(map, points, Hall, id) do
           map
-          |> get({x, y})
-          |> case do
-            nil -> nil
-            v -> v
-          end
+          |> place_walls(points, 0)
+          |> carve_halls()
         end
-      end
+    end
+  end
 
-    %__MODULE__{map | map: data}
+  def trace_hall(map, start_point) do
+    trace_hall(map, [start_point], [start_point])
+  end
+
+  def trace_hall(_map, [], traced_points) do
+    Enum.reverse(traced_points)
+  end
+
+  def trace_hall(%__MODULE__{width: width, height: height} = map, available_points, traced_points) do
+    point = Enum.random(available_points)
+
+    possible_points =
+      point
+      |> surrounding_points({width, height})
+      |> Enum.shuffle()
+
+    case Enum.find(possible_points, &can_trace_point?(map, traced_points, &1)) do
+      {_, _} = new_point ->
+        trace_hall(map, [new_point | available_points], [new_point | traced_points])
+
+      nil ->
+        trace_hall(map, List.delete(available_points, point), traced_points)
+    end
+  end
+
+  defp can_trace_point?(map, [], point) do
+    is_nil(get(map, point))
+  end
+
+  defp can_trace_point?(
+         %__MODULE__{width: width, height: height} = map,
+         [last_point | _] = traced_points,
+         point
+       ) do
+    empty_tile = is_nil(get(map, point))
+    in_traced = point in traced_points
+    surrounding_points = surrounding_points(point, {width, height}) -- [last_point]
+    any_surrounding_traced = Enum.any?(surrounding_points, &(&1 in traced_points))
+
+    empty_tile and !in_traced and !any_surrounding_traced
+  end
+
+  def surrounding_points({x, y}, {max_x, max_y}) do
+    points = [
+      {x, y - 1},
+      {x - 1, y},
+      {x + 1, y},
+      {x, y + 1}
+    ]
+
+    for {nx, ny} <- points,
+        nx != 0,
+        ny != 0,
+        nx != max_x,
+        ny != max_y do
+      {nx, ny}
+    end
+  end
+
+  def find_empty(%__MODULE__{width: width, height: height, map: data}) do
+    data
+    |> Enum.with_index()
+    |> Enum.find_value(fn {row, ridx} ->
+      cidx =
+        row
+        |> Enum.with_index()
+        |> Enum.find_value(fn {x, cidx} ->
+          case {x, cidx} do
+            {_, 0} -> false
+            {_, ^width} -> false
+            {nil, _} -> cidx
+            _ -> false
+          end
+        end)
+
+      case {cidx, ridx} do
+        {_, 0} -> false
+        {_, ^height} -> false
+        {nil, _} -> false
+        {cidx, _} -> {cidx, ridx}
+      end
+    end)
   end
 
   defp do_place_room(%__MODULE__{} = map, _size, _, 0), do: map
@@ -102,30 +189,58 @@ defmodule ExRogue.Map do
     end
   end
 
-  defp carve(%__MODULE__{} = map, {tx, ty}, {bx, by}, type, id) do
-    points =
-      for x <- tx..bx, y <- ty..by do
-        {x, y}
-      end
+  defp square_points({tx, ty}, {bx, by}) do
+    for x <- tx..bx, y <- ty..by do
+      {x, y}
+    end
+  end
 
-    Enum.reduce_while(points, {:ok, map}, fn point, {:ok, map} ->
-      case carve(map, point, type, id) do
-        {:ok, map} -> {:cont, {:ok, map}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
+  defp carve(%__MODULE__{} = map, top_left, bottom_right, type, id) do
+    points = square_points(top_left, bottom_right)
+
+    with {:ok, map} <- carve_points(map, points, type, id) do
+      map = place_walls(map, points, id)
+      {:ok, map}
+    end
+  end
+
+  defp carve_points(%__MODULE__{} = map, points, type, id) do
+    case Enum.any?(points, fn point -> !is_nil(get(map, point)) end) do
+      true ->
+        {:error, :collision}
+
+      false ->
+        map =
+          Enum.reduce(points, map, fn point, map ->
+            update(map, point, struct(type, %{id: id, position: point}))
+          end)
+
+        {:ok, map}
+    end
+  end
+
+  def place_walls(%__MODULE__{width: width, height: height} = map, points, id) do
+    points
+    |> Enum.flat_map(&adjacent_points(&1, {width, height}))
+    |> Enum.uniq()
+    |> Enum.filter(fn point ->
+      is_nil(get(map, point))
+    end)
+    |> Enum.reduce(map, fn point, map ->
+      update(map, point, %Wall{id: id, position: point})
     end)
   end
 
-  defp carve(%__MODULE__{} = map, {x, y}, type, id) do
-    map_region(map, {x - 1, y - 1}, {x + 1, y + 1}, fn point, curr_value ->
-      case {point, curr_value} do
-        {{^x, ^y}, %Wall{}} -> {:ok, struct(type, %{id: id, position: {x, y}})}
-        {_point, tile} when not is_nil(tile) -> {:ok, tile}
-        {{^x, ^y}, nil} -> {:ok, struct(type, %{id: id, position: {x, y}})}
-        {{^x, ^y}, _} -> {:error, :collision}
-        _ -> {:ok, struct(Wall, %{id: id, position: {x, y}})}
-      end
-    end)
+  defp adjacent_points({x, y}, {max_x, max_y}) do
+    for nx <- (x - 1)..(x + 1),
+        ny <- (y - 1)..(y + 1),
+        nx != 0,
+        ny != 0,
+        {nx, ny} != {x, y},
+        nx != max_x,
+        ny != max_y do
+      {nx, ny}
+    end
   end
 
   def map_region(%__MODULE__{} = map, {tx, ty}, {bx, by}, fun) do
@@ -169,7 +284,7 @@ end
 defimpl Inspect, for: ExRogue.Map do
   import Inspect.Algebra
   alias ExRogue.Map
-  alias ExRogue.Map.Tile.{Room, Wall}
+  alias ExRogue.Map.Tile.{Hall, Room, Wall}
 
   def inspect(%Map{width: width, map: map}, _opts) do
     data =
@@ -182,6 +297,7 @@ defimpl Inspect, for: ExRogue.Map do
                 nil -> " "
                 %Room{} -> "."
                 %Wall{} -> "#"
+                %Hall{} -> "*"
               end
             end
 
