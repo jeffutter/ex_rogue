@@ -18,7 +18,12 @@ defmodule ExRogue.Map do
     @type t :: %__MODULE__{id: integer, position: {integer, integer}}
   end
 
-  alias Tile.{Hall, Room, Wall}
+  defmodule Tile.Door do
+    defstruct id: 0, position: {0, 0}
+    @type t :: %__MODULE__{id: integer, position: {integer, integer}}
+  end
+
+  alias Tile.{Door, Hall, Room, Wall}
 
   def build(options \\ []) do
     width = Keyword.get(options, :width, 50)
@@ -28,6 +33,7 @@ defmodule ExRogue.Map do
     |> new(height)
     |> place_rooms(options)
     |> carve_halls()
+    |> carve_doors()
   end
 
   def new(width, height) do
@@ -118,6 +124,45 @@ defmodule ExRogue.Map do
     empty_tile and !in_traced and !any_surrounding_traced
   end
 
+  def carve_doors(%__MODULE__{map: data, width: width, height: height} = map) do
+    data
+    |> Enum.flat_map(fn row ->
+      Enum.flat_map(row, fn tile ->
+        case tile do
+          %Wall{position: position} ->
+            surrounding_points = surrounding_points(position, {width, height})
+
+            for {a, b} <- combinations(surrounding_points),
+                %mod_a{id: a_id} = get(map, a),
+                %mod_b{id: b_id} = get(map, b),
+                a_id != b_id,
+                mod_a != Wall,
+                mod_b != Wall,
+                !(mod_a == Hall and mod_b == Hall) do
+              {position, Enum.sort([{mod_a, a_id}, {mod_b, b_id}])}
+            end
+
+          _ ->
+            []
+        end
+      end)
+    end)
+    |> Enum.group_by(fn {_v, k} -> k end, fn {v, _k} -> v end)
+    |> Enum.map(fn {_k, v} -> Enum.random(v) end)
+    |> Enum.reduce(map, fn point, map ->
+      id = System.unique_integer([:positive, :monotonic])
+      update(map, point, %Door{id: id, position: point})
+    end)
+  end
+
+  def combinations([]), do: []
+
+  def combinations([head | tail]) do
+    for i <- tail do
+      {head, i}
+    end ++ combinations(tail)
+  end
+
   def surrounding_points({x, y}, {max_x, max_y}) do
     points = [
       {x, y - 1},
@@ -163,8 +208,6 @@ defmodule ExRogue.Map do
   defp do_place_room(%__MODULE__{} = map, _size, _, 0), do: map
 
   defp do_place_room(%__MODULE__{width: map_width, height: map_height} = map, size, id, attempts) do
-    IO.inspect(size, label: "Size")
-    IO.inspect(attempts, label: "Attempts")
     # +2 for walls
     width = Enum.random(1..floor(size / 2)) + 2
     # +2 for walls
@@ -177,9 +220,6 @@ defmodule ExRogue.Map do
     right = left + width - 1
     top = Enum.random(1..y_max)
     bottom = top + height - 1
-
-    IO.inspect({width, height}, label: "WH")
-    IO.inspect({left, right, top, bottom}, label: "Cords")
 
     map
     |> carve({left, top}, {right, bottom}, Room, id)
@@ -250,7 +290,8 @@ defmodule ExRogue.Map do
       |> Enum.reduce_while({:ok, map}, fn y, {:ok, map} ->
         value = get(map, {x, y})
 
-        fun.({x, y}, value)
+        {x, y}
+        |> fun.(value)
         |> case do
           {:ok, value} ->
             {:cont, {:ok, update(map, {x, y}, value)}}
@@ -284,7 +325,7 @@ end
 defimpl Inspect, for: ExRogue.Map do
   import Inspect.Algebra
   alias ExRogue.Map
-  alias ExRogue.Map.Tile.{Hall, Room, Wall}
+  alias ExRogue.Map.Tile.{Door, Hall, Room, Wall}
 
   def inspect(%Map{width: width, map: map}, _opts) do
     data =
@@ -297,7 +338,8 @@ defimpl Inspect, for: ExRogue.Map do
                 nil -> " "
                 %Room{} -> "."
                 %Wall{} -> "#"
-                %Hall{} -> "*"
+                %Hall{} -> "."
+                %Door{} -> "D"
               end
             end
 
