@@ -29,6 +29,7 @@ defmodule ExRogue.Map do
 
   alias Tile.{Door, Hall, Room, Wall}
 
+  # Public Functions
   def build(options \\ []) do
     width = Keyword.get(options, :width, 50)
     height = Keyword.get(options, :height, 30)
@@ -51,6 +52,8 @@ defmodule ExRogue.Map do
 
     %__MODULE__{map: map, top_left: {0, 0}, bottom_right: {width - 1, height - 1}}
   end
+
+  # Public Functions
 
   def place_rooms(%__MODULE__{} = map, options \\ []) do
     rooms = Keyword.get(options, :rooms, 4)
@@ -85,57 +88,6 @@ defmodule ExRogue.Map do
           |> carve_halls()
         end
     end
-  end
-
-  def trace_hall(map, start_point) do
-    trace_hall(map, [start_point], [start_point])
-  end
-
-  def trace_hall(_map, [], traced_points) do
-    Enum.reverse(traced_points)
-  end
-
-  def trace_hall(%__MODULE__{} = map, available_points, traced_points) do
-    point = Enum.random(available_points)
-
-    possible_points =
-      point
-      |> surrounding_points(map)
-      |> Enum.shuffle()
-
-    case Enum.find(possible_points, &can_trace_point?(map, traced_points, &1)) do
-      {_, _} = new_point ->
-        trace_hall(map, [new_point | available_points], [new_point | traced_points])
-
-      nil ->
-        trace_hall(map, List.delete(available_points, point), traced_points)
-    end
-  end
-
-  defp can_trace_point?(
-         %__MODULE__{top_left: {min_x, min_y}, bottom_right: {max_x, max_y}},
-         _,
-         {x, y}
-       )
-       when x == max_x or y == max_y or x == min_x or y == min_y do
-    false
-  end
-
-  defp can_trace_point?(map, [], point) do
-    is_nil(get(map, point))
-  end
-
-  defp can_trace_point?(
-         %__MODULE__{} = map,
-         [last_point | _] = traced_points,
-         point
-       ) do
-    empty_tile = is_nil(get(map, point))
-    in_traced = point in traced_points
-    surrounding_points = surrounding_points(point, map) -- [last_point]
-    any_surrounding_traced = Enum.any?(surrounding_points, &(&1 in traced_points))
-
-    empty_tile and !in_traced and !any_surrounding_traced
   end
 
   def carve_doors(%__MODULE__{map: data} = map) do
@@ -212,7 +164,157 @@ defmodule ExRogue.Map do
     end
   end
 
-  def is_dead_end?(%__MODULE__{} = map, point) do
+  def place_walls(%__MODULE__{} = map, points, id) do
+    points
+    |> Enum.flat_map(&adjacent_points(&1, map))
+    |> Enum.uniq()
+    |> Enum.filter(fn point ->
+      is_nil(get(map, point))
+    end)
+    |> Enum.reduce(map, fn point, map ->
+      update(map, point, %Wall{id: id, position: point})
+    end)
+  end
+
+  # Private Functions
+
+  defp adjacent_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
+    for nx <- (x - 1)..(x + 1),
+        ny <- (y - 1)..(y + 1),
+        nx >= 0,
+        ny >= 0,
+        {nx, ny} != {x, y},
+        nx <= max_x,
+        ny <= max_y do
+      {nx, ny}
+    end
+  end
+
+  defp can_trace_point?(
+         %__MODULE__{top_left: {min_x, min_y}, bottom_right: {max_x, max_y}},
+         _,
+         {x, y}
+       )
+       when x == max_x or y == max_y or x == min_x or y == min_y do
+    false
+  end
+
+  defp can_trace_point?(map, [], point) do
+    is_nil(get(map, point))
+  end
+
+  defp can_trace_point?(
+         %__MODULE__{} = map,
+         [last_point | _] = traced_points,
+         point
+       ) do
+    empty_tile = is_nil(get(map, point))
+    in_traced = point in traced_points
+    surrounding_points = surrounding_points(point, map) -- [last_point]
+    any_surrounding_traced = Enum.any?(surrounding_points, &(&1 in traced_points))
+
+    empty_tile and !in_traced and !any_surrounding_traced
+  end
+
+  defp carve(%__MODULE__{} = map, top_left, bottom_right, type, id) do
+    points = points_for_region(top_left, bottom_right)
+
+    with {:ok, map} <- carve_points(map, points, type, id) do
+      map = place_walls(map, points, id)
+      {:ok, map}
+    end
+  end
+
+  defp carve_points(%__MODULE__{} = map, points, type, id) do
+    case Enum.any?(points, fn point -> !is_nil(get(map, point)) end) do
+      true ->
+        {:error, :collision}
+
+      false ->
+        map =
+          Enum.reduce(points, map, fn point, map ->
+            update(map, point, struct(type, %{id: id, position: point}))
+          end)
+
+        {:ok, map}
+    end
+  end
+
+  defp combinations([]), do: []
+
+  defp combinations([head | tail]) do
+    for i <- tail do
+      {head, i}
+    end ++ combinations(tail)
+  end
+
+  defp do_place_room(%__MODULE__{} = map, _size, _, 0), do: map
+
+  defp do_place_room(%__MODULE__{bottom_right: {max_x, max_y}} = map, size, id, attempts) do
+    width = Enum.random(2..floor(size / 2))
+    height = floor(size / width)
+
+    x_max = max_x - width - 1
+    y_max = max_y - height - 1
+
+    left = Enum.random(1..x_max)
+    right = left + width - 1
+    top = Enum.random(1..y_max)
+    bottom = top + height - 1
+
+    map
+    |> carve({left, top}, {right, bottom}, Room, id)
+    |> case do
+      {:ok, map} -> map
+      {:error, :collision} -> do_place_room(map, size, id, attempts - 1)
+    end
+  end
+
+  defp find_empty(%__MODULE__{map: data}) do
+    data
+    |> Enum.with_index()
+    |> Enum.find_value(fn {row, ridx} ->
+      cidx =
+        row
+        |> Enum.with_index()
+        |> Enum.find_value(fn {x, cidx} ->
+          case {x, cidx} do
+            {nil, _} -> cidx
+            _ -> false
+          end
+        end)
+
+      case {cidx, ridx} do
+        {nil, _} -> false
+        {cidx, _} -> {cidx, ridx}
+      end
+    end)
+  end
+
+  defp get(%__MODULE__{map: map}, {x, y}) do
+    get_in(map, [Access.at(y), Access.at(x)])
+  end
+
+  defp iterate_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
+    top_left
+    |> points_for_region(bottom_right)
+    |> Enum.reduce_while({:ok, map}, fn point, {:ok, map} ->
+      map
+      |> fun.(point)
+      |> case do
+        :ok ->
+          {:cont, {:ok, map}}
+
+        {:ok, map} ->
+          {:cont, {:ok, map}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp is_dead_end?(%__MODULE__{} = map, point) do
     case get(map, point) do
       %str{} when str == Hall or str == Door ->
         surrounding_points = surrounding_points(point, map)
@@ -240,15 +342,29 @@ defmodule ExRogue.Map do
     end
   end
 
-  def combinations([]), do: []
+  defp map_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
+    iterate_region(map, top_left, bottom_right, fn map, point ->
+      value = get(map, point)
 
-  def combinations([head | tail]) do
-    for i <- tail do
-      {head, i}
-    end ++ combinations(tail)
+      point
+      |> fun.(value)
+      |> case do
+        {:ok, value} ->
+          {:ok, update(map, point, value)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
-  def surrounding_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
+  defp points_for_region({tx, ty}, {bx, by}) do
+    for x <- tx..bx, y <- ty..by do
+      {x, y}
+    end
+  end
+
+  defp surrounding_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
     points = [
       {x, y - 1},
       {x - 1, y},
@@ -265,140 +381,29 @@ defmodule ExRogue.Map do
     end
   end
 
-  def find_empty(%__MODULE__{map: data}) do
-    data
-    |> Enum.with_index()
-    |> Enum.find_value(fn {row, ridx} ->
-      cidx =
-        row
-        |> Enum.with_index()
-        |> Enum.find_value(fn {x, cidx} ->
-          case {x, cidx} do
-            {nil, _} -> cidx
-            _ -> false
-          end
-        end)
-
-      case {cidx, ridx} do
-        {nil, _} -> false
-        {cidx, _} -> {cidx, ridx}
-      end
-    end)
+  defp trace_hall(map, start_point) do
+    trace_hall(map, [start_point], [start_point])
   end
 
-  defp do_place_room(%__MODULE__{} = map, _size, _, 0), do: map
-
-  defp do_place_room(%__MODULE__{bottom_right: {max_x, max_y}} = map, size, id, attempts) do
-    width = Enum.random(2..floor(size / 2))
-    height = floor(size / width)
-
-    x_max = max_x - width - 1
-    y_max = max_y - height - 1
-
-    left = Enum.random(1..x_max)
-    right = left + width - 1
-    top = Enum.random(1..y_max)
-    bottom = top + height - 1
-
-    map
-    |> carve({left, top}, {right, bottom}, Room, id)
-    |> case do
-      {:ok, map} -> map
-      {:error, :collision} -> do_place_room(map, size, id, attempts - 1)
-    end
+  defp trace_hall(_map, [], traced_points) do
+    Enum.reverse(traced_points)
   end
 
-  defp carve(%__MODULE__{} = map, top_left, bottom_right, type, id) do
-    points = points_for_region(top_left, bottom_right)
+  defp trace_hall(%__MODULE__{} = map, available_points, traced_points) do
+    point = Enum.random(available_points)
 
-    with {:ok, map} <- carve_points(map, points, type, id) do
-      map = place_walls(map, points, id)
-      {:ok, map}
-    end
-  end
-
-  defp carve_points(%__MODULE__{} = map, points, type, id) do
-    case Enum.any?(points, fn point -> !is_nil(get(map, point)) end) do
-      true ->
-        {:error, :collision}
-
-      false ->
-        map =
-          Enum.reduce(points, map, fn point, map ->
-            update(map, point, struct(type, %{id: id, position: point}))
-          end)
-
-        {:ok, map}
-    end
-  end
-
-  def place_walls(%__MODULE__{} = map, points, id) do
-    points
-    |> Enum.flat_map(&adjacent_points(&1, map))
-    |> Enum.uniq()
-    |> Enum.filter(fn point ->
-      is_nil(get(map, point))
-    end)
-    |> Enum.reduce(map, fn point, map ->
-      update(map, point, %Wall{id: id, position: point})
-    end)
-  end
-
-  defp adjacent_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
-    for nx <- (x - 1)..(x + 1),
-        ny <- (y - 1)..(y + 1),
-        nx >= 0,
-        ny >= 0,
-        {nx, ny} != {x, y},
-        nx <= max_x,
-        ny <= max_y do
-      {nx, ny}
-    end
-  end
-
-  def map_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
-    iterate_region(map, top_left, bottom_right, fn map, point ->
-      value = get(map, point)
-
+    possible_points =
       point
-      |> fun.(value)
-      |> case do
-        {:ok, value} ->
-          {:ok, update(map, point, value)}
+      |> surrounding_points(map)
+      |> Enum.shuffle()
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
-  end
+    case Enum.find(possible_points, &can_trace_point?(map, traced_points, &1)) do
+      {_, _} = new_point ->
+        trace_hall(map, [new_point | available_points], [new_point | traced_points])
 
-  def iterate_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
-    top_left
-    |> points_for_region(bottom_right)
-    |> Enum.reduce_while({:ok, map}, fn point, {:ok, map} ->
-      map
-      |> fun.(point)
-      |> case do
-        :ok ->
-          {:cont, {:ok, map}}
-
-        {:ok, map} ->
-          {:cont, {:ok, map}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  def points_for_region({tx, ty}, {bx, by}) do
-    for x <- tx..bx, y <- ty..by do
-      {x, y}
+      nil ->
+        trace_hall(map, List.delete(available_points, point), traced_points)
     end
-  end
-
-  defp get(%__MODULE__{map: map}, {x, y}) do
-    get_in(map, [Access.at(y), Access.at(x)])
   end
 
   defp update(%__MODULE__{map: data} = map, {x, y}, value) do
