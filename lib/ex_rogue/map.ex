@@ -34,6 +34,7 @@ defmodule ExRogue.Map do
     |> place_rooms(options)
     |> carve_halls()
     |> carve_doors()
+    |> remove_dead_ends()
   end
 
   def new(width, height) do
@@ -126,26 +127,25 @@ defmodule ExRogue.Map do
 
   def carve_doors(%__MODULE__{map: data, width: width, height: height} = map) do
     data
-    |> Enum.flat_map(fn row ->
-      Enum.flat_map(row, fn tile ->
-        case tile do
-          %Wall{position: position} ->
-            surrounding_points = surrounding_points(position, {width, height})
+    |> List.flatten()
+    |> Enum.flat_map(fn tile ->
+      case tile do
+        %Wall{position: position} ->
+          surrounding_points = surrounding_points(position, {width, height})
 
-            for {a, b} <- combinations(surrounding_points),
-                %mod_a{id: a_id} = get(map, a),
-                %mod_b{id: b_id} = get(map, b),
-                a_id != b_id,
-                mod_a != Wall,
-                mod_b != Wall,
-                !(mod_a == Hall and mod_b == Hall) do
-              {position, Enum.sort([{mod_a, a_id}, {mod_b, b_id}])}
-            end
+          for {a, b} <- combinations(surrounding_points),
+              %mod_a{id: a_id} = get(map, a),
+              %mod_b{id: b_id} = get(map, b),
+              a_id != b_id,
+              mod_a != Wall,
+              mod_b != Wall,
+              !(mod_a == Hall and mod_b == Hall) do
+            {position, Enum.sort([{mod_a, a_id}, {mod_b, b_id}])}
+          end
 
-          _ ->
-            []
-        end
-      end)
+        _ ->
+          []
+      end
     end)
     |> Enum.group_by(fn {_v, k} -> k end, fn {v, _k} -> v end)
     |> Enum.map(fn {_k, v} -> Enum.random(v) end)
@@ -153,6 +153,78 @@ defmodule ExRogue.Map do
       id = System.unique_integer([:positive, :monotonic])
       update(map, point, %Door{id: id, position: point})
     end)
+  end
+
+  def remove_dead_ends(%__MODULE__{width: width, height: height} = map) do
+    iterate_region(map, {0, 0}, {width, height}, fn map, point ->
+      case is_dead_end?(map, point) do
+        true ->
+          map = remove_dead_end(map, point)
+          {:ok, map}
+
+        false ->
+          {:ok, map}
+      end
+    end)
+  end
+
+  def remove_dead_end(%__MODULE__{width: width, height: height} = map, point) do
+    map = update(map, point, %Wall{id: 0, position: point})
+
+    next =
+      point
+      |> surrounding_points({width, height})
+      |> Enum.find(fn point ->
+        tile = get(map, point)
+
+        case tile do
+          %Hall{} -> true
+          %Door{} -> true
+          _ -> false
+        end
+      end)
+
+    case next do
+      nil ->
+        map
+
+      next ->
+        case is_dead_end?(map, next) do
+          true ->
+            remove_dead_end(map, next)
+
+          false ->
+            map
+        end
+    end
+  end
+
+  def is_dead_end?(%__MODULE__{width: width, height: height} = map, point) do
+    case get(map, point) do
+      %str{} when str == Hall or str == Door ->
+        surrounding_points = surrounding_points(point, {width, height})
+
+        walls =
+          surrounding_points
+          |> Enum.filter(fn point ->
+            tile = get(map, point)
+
+            case tile do
+              %Wall{} -> true
+              nil -> true
+              _ -> false
+            end
+          end)
+
+        case length(surrounding_points) - length(walls) do
+          0 -> true
+          1 -> true
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
   end
 
   def combinations([]), do: []
@@ -229,14 +301,8 @@ defmodule ExRogue.Map do
     end
   end
 
-  defp square_points({tx, ty}, {bx, by}) do
-    for x <- tx..bx, y <- ty..by do
-      {x, y}
-    end
-  end
-
   defp carve(%__MODULE__{} = map, top_left, bottom_right, type, id) do
-    points = square_points(top_left, bottom_right)
+    points = points_for_region(top_left, bottom_right)
 
     with {:ok, map} <- carve_points(map, points, type, id) do
       map = place_walls(map, points, id)
@@ -283,28 +349,45 @@ defmodule ExRogue.Map do
     end
   end
 
-  def map_region(%__MODULE__{} = map, {tx, ty}, {bx, by}, fun) do
-    tx..bx
-    |> Enum.reduce_while({:ok, map}, fn x, {:ok, map} ->
-      ty..by
-      |> Enum.reduce_while({:ok, map}, fn y, {:ok, map} ->
-        value = get(map, {x, y})
+  def map_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
+    iterate_region(map, top_left, bottom_right, fn map, point ->
+      value = get(map, point)
 
-        {x, y}
-        |> fun.(value)
-        |> case do
-          {:ok, value} ->
-            {:cont, {:ok, update(map, {x, y}, value)}}
-
-          {:error, reason} ->
-            {:halt, {:error, reason}}
-        end
-      end)
+      point
+      |> fun.(value)
       |> case do
-        {:ok, map} -> {:cont, {:ok, map}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, value} ->
+          {:ok, update(map, point, value)}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end)
+  end
+
+  def iterate_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
+    top_left
+    |> points_for_region(bottom_right)
+    |> Enum.reduce_while({:ok, map}, fn point, {:ok, map} ->
+      map
+      |> fun.(point)
+      |> case do
+        :ok ->
+          {:cont, {:ok, map}}
+
+        {:ok, map} ->
+          {:cont, {:ok, map}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  def points_for_region({tx, ty}, {bx, by}) do
+    for x <- tx..bx, y <- ty..by do
+      {x, y}
+    end
   end
 
   defp get(%__MODULE__{map: map}, {x, y}) do
@@ -314,11 +397,6 @@ defmodule ExRogue.Map do
   defp update(%__MODULE__{map: data} = map, {x, y}, value) do
     data = put_in(data, [Access.at(y), Access.at(x)], value)
     %__MODULE__{map | map: data}
-  end
-
-  defp get_and_update(%__MODULE__{map: data} = map, {x, y}, value) do
-    {old_val, data} = get_and_update_in(data, [Access.at(y), Access.at(x)], &{&1, value})
-    {old_val, %__MODULE__{map | map: data}}
   end
 end
 
