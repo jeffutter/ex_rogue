@@ -1,12 +1,4 @@
 defmodule ExRogue.Map do
-  defstruct map: [], top_left: {0, 0}, bottom_right: {0, 0}
-
-  @type t :: %__MODULE__{
-          map: list(list(any)),
-          top_left: {integer, integer},
-          bottom_right: {integer, integer}
-        }
-
   defmodule Tile.Wall do
     defstruct id: 0, position: {0, 0}
     @type t :: %__MODULE__{id: integer, position: {integer, integer}}
@@ -29,7 +21,22 @@ defmodule ExRogue.Map do
 
   alias Tile.{Door, Hall, Room, Wall}
 
+  defstruct map: [], top_left: {0, 0}, bottom_right: {0, 0}
+
+  @type point :: {non_neg_integer, non_neg_integer}
+
+  @type t :: %__MODULE__{
+          map: list(list(any)),
+          top_left: point,
+          bottom_right: point
+        }
+
+  @type iterate_mapper :: (t, point -> :ok | {:ok, t} | {:error, atom})
+
+  @type tile :: Door.t() | Hall.t() | Room.t() | Wall.t()
+
   # Public Functions
+  @spec build(keyword) :: {:ok, t()} | {:error, atom}
   def build(options \\ []) do
     width = Keyword.get(options, :width, 50)
     height = Keyword.get(options, :height, 30)
@@ -42,6 +49,7 @@ defmodule ExRogue.Map do
     |> remove_dead_ends()
   end
 
+  @spec new(integer, integer) :: t()
   def new(width, height) do
     map =
       for _ <- 0..(height - 1) do
@@ -55,12 +63,14 @@ defmodule ExRogue.Map do
 
   # Public Functions
 
+  @spec place_rooms(t(), keyword) :: t()
   def place_rooms(%__MODULE__{} = map, options \\ []) do
     rooms = Keyword.get(options, :rooms, 4)
 
     Enum.reduce(1..rooms, map, fn _, map -> place_room(map, options) end)
   end
 
+  @spec place_room(t(), keyword, integer, integer) :: t()
   def place_room(
         %__MODULE__{} = map,
         options \\ [],
@@ -90,6 +100,7 @@ defmodule ExRogue.Map do
     end
   end
 
+  @spec carve_doors(t()) :: t()
   def carve_doors(%__MODULE__{map: data} = map) do
     data
     |> List.flatten()
@@ -120,19 +131,22 @@ defmodule ExRogue.Map do
     end)
   end
 
+  @spec remove_dead_ends(t()) :: {:ok, t()} | {:error, atom}
   def remove_dead_ends(%__MODULE__{top_left: top_left, bottom_right: bottom_right} = map) do
-    iterate_region(map, top_left, bottom_right, fn map, point ->
+    top_left
+    |> points_for_region(bottom_right)
+    |> Enum.reduce(map, fn point, map ->
       case is_dead_end?(map, point) do
         true ->
-          map = remove_dead_end(map, point)
-          {:ok, map}
+          remove_dead_end(map, point)
 
         false ->
-          {:ok, map}
+          map
       end
     end)
   end
 
+  @spec remove_dead_end(t(), point) :: t()
   def remove_dead_end(%__MODULE__{} = map, point) do
     map = update(map, point, %Wall{id: 0, position: point})
 
@@ -164,6 +178,7 @@ defmodule ExRogue.Map do
     end
   end
 
+  @spec place_walls(t(), list(point), integer) :: t()
   def place_walls(%__MODULE__{} = map, points, id) do
     points
     |> Enum.flat_map(&adjacent_points(&1, map))
@@ -190,6 +205,7 @@ defmodule ExRogue.Map do
     end
   end
 
+  @spec can_trace_point?(t(), list(point), point) :: boolean
   defp can_trace_point?(
          %__MODULE__{top_left: {min_x, min_y}, bottom_right: {max_x, max_y}},
          _,
@@ -199,7 +215,9 @@ defmodule ExRogue.Map do
     false
   end
 
-  defp can_trace_point?(map, [], point) do
+  @dialyzer [{:nowarn_function, can_trace_point?: 3}, :no_match]
+
+  defp can_trace_point?(%__MODULE__{} = map, [], point) do
     is_nil(get(map, point))
   end
 
@@ -216,6 +234,7 @@ defmodule ExRogue.Map do
     empty_tile and !in_traced and !any_surrounding_traced
   end
 
+  @spec carve(t(), point, point, atom, integer) :: {:ok, t()} | {:error, atom}
   defp carve(%__MODULE__{} = map, top_left, bottom_right, type, id) do
     points = points_for_region(top_left, bottom_right)
 
@@ -225,6 +244,7 @@ defmodule ExRogue.Map do
     end
   end
 
+  @spec carve_points(t(), list(point), atom, integer) :: {:ok, t()} | {:error, atom}
   defp carve_points(%__MODULE__{} = map, points, type, id) do
     case Enum.any?(points, fn point -> !is_nil(get(map, point)) end) do
       true ->
@@ -240,6 +260,7 @@ defmodule ExRogue.Map do
     end
   end
 
+  @spec combinations(list()) :: list({any, any})
   defp combinations([]), do: []
 
   defp combinations([head | tail]) do
@@ -248,6 +269,7 @@ defmodule ExRogue.Map do
     end ++ combinations(tail)
   end
 
+  @spec do_place_room(t(), non_neg_integer, non_neg_integer, non_neg_integer) :: t
   defp do_place_room(%__MODULE__{} = map, _size, _, 0), do: map
 
   defp do_place_room(%__MODULE__{bottom_right: {max_x, max_y}} = map, size, id, attempts) do
@@ -270,50 +292,21 @@ defmodule ExRogue.Map do
     end
   end
 
-  defp find_empty(%__MODULE__{map: data}) do
-    data
-    |> Enum.with_index()
-    |> Enum.find_value(fn {row, ridx} ->
-      cidx =
-        row
-        |> Enum.with_index()
-        |> Enum.find_value(fn {x, cidx} ->
-          case {x, cidx} do
-            {nil, _} -> cidx
-            _ -> false
-          end
-        end)
-
-      case {cidx, ridx} do
-        {nil, _} -> false
-        {cidx, _} -> {cidx, ridx}
-      end
+  @spec find_empty(t()) :: point | nil
+  defp find_empty(%__MODULE__{top_left: top_left, bottom_right: bottom_right} = map) do
+    top_left
+    |> points_for_region(bottom_right)
+    |> Enum.find(fn point ->
+      is_nil(get(map, point))
     end)
   end
 
+  @spec get(t(), point) :: tile
   defp get(%__MODULE__{map: map}, {x, y}) do
     get_in(map, [Access.at(y), Access.at(x)])
   end
 
-  defp iterate_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
-    top_left
-    |> points_for_region(bottom_right)
-    |> Enum.reduce_while({:ok, map}, fn point, {:ok, map} ->
-      map
-      |> fun.(point)
-      |> case do
-        :ok ->
-          {:cont, {:ok, map}}
-
-        {:ok, map} ->
-          {:cont, {:ok, map}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-  end
-
+  @spec is_dead_end?(t, point) :: boolean
   defp is_dead_end?(%__MODULE__{} = map, point) do
     case get(map, point) do
       %str{} when str == Hall or str == Door ->
@@ -342,28 +335,14 @@ defmodule ExRogue.Map do
     end
   end
 
-  defp map_region(%__MODULE__{} = map, top_left, bottom_right, fun) do
-    iterate_region(map, top_left, bottom_right, fn map, point ->
-      value = get(map, point)
-
-      point
-      |> fun.(value)
-      |> case do
-        {:ok, value} ->
-          {:ok, update(map, point, value)}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
-  end
-
+  @spec points_for_region(point, point) :: list(point)
   defp points_for_region({tx, ty}, {bx, by}) do
     for x <- tx..bx, y <- ty..by do
       {x, y}
     end
   end
 
+  @spec surrounding_points(point, t()) :: list(point)
   defp surrounding_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
     points = [
       {x, y - 1},
@@ -381,11 +360,13 @@ defmodule ExRogue.Map do
     end
   end
 
-  defp trace_hall(map, start_point) do
+  @spec trace_hall(t(), point) :: list(point)
+  defp trace_hall(%__MODULE__{} = map, start_point) do
     trace_hall(map, [start_point], [start_point])
   end
 
-  defp trace_hall(_map, [], traced_points) do
+  @spec trace_hall(t(), list(point), list(point)) :: list(point)
+  defp trace_hall(%__MODULE__{}, [], traced_points) do
     Enum.reverse(traced_points)
   end
 
@@ -406,6 +387,7 @@ defmodule ExRogue.Map do
     end
   end
 
+  @spec update(t(), point, any) :: t()
   defp update(%__MODULE__{map: data} = map, {x, y}, value) do
     data = put_in(data, [Access.at(y), Access.at(x)], value)
     %__MODULE__{map | map: data}
