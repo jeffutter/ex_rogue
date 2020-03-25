@@ -1,7 +1,11 @@
 defmodule ExRogue.Map do
-  defstruct width: 0, height: 0, map: []
+  defstruct map: [], top_left: {0, 0}, bottom_right: {0, 0}
 
-  @type t :: %__MODULE__{width: integer, height: integer, map: list(list(any))}
+  @type t :: %__MODULE__{
+          map: list(list(any)),
+          top_left: {integer, integer},
+          bottom_right: {integer, integer}
+        }
 
   defmodule Tile.Wall do
     defstruct id: 0, position: {0, 0}
@@ -39,13 +43,13 @@ defmodule ExRogue.Map do
 
   def new(width, height) do
     map =
-      for _ <- 0..height do
-        for _ <- 0..width do
+      for _ <- 0..(height - 1) do
+        for _ <- 0..(width - 1) do
           nil
         end
       end
 
-    %__MODULE__{width: width, height: height, map: map}
+    %__MODULE__{map: map, top_left: {0, 0}, bottom_right: {width - 1, height - 1}}
   end
 
   def place_rooms(%__MODULE__{} = map, options \\ []) do
@@ -91,12 +95,12 @@ defmodule ExRogue.Map do
     Enum.reverse(traced_points)
   end
 
-  def trace_hall(%__MODULE__{width: width, height: height} = map, available_points, traced_points) do
+  def trace_hall(%__MODULE__{} = map, available_points, traced_points) do
     point = Enum.random(available_points)
 
     possible_points =
       point
-      |> surrounding_points({width, height})
+      |> surrounding_points(map)
       |> Enum.shuffle()
 
     case Enum.find(possible_points, &can_trace_point?(map, traced_points, &1)) do
@@ -108,30 +112,39 @@ defmodule ExRogue.Map do
     end
   end
 
+  defp can_trace_point?(
+         %__MODULE__{top_left: {min_x, min_y}, bottom_right: {max_x, max_y}},
+         _,
+         {x, y}
+       )
+       when x == max_x or y == max_y or x == min_x or y == min_y do
+    false
+  end
+
   defp can_trace_point?(map, [], point) do
     is_nil(get(map, point))
   end
 
   defp can_trace_point?(
-         %__MODULE__{width: width, height: height} = map,
+         %__MODULE__{} = map,
          [last_point | _] = traced_points,
          point
        ) do
     empty_tile = is_nil(get(map, point))
     in_traced = point in traced_points
-    surrounding_points = surrounding_points(point, {width, height}) -- [last_point]
+    surrounding_points = surrounding_points(point, map) -- [last_point]
     any_surrounding_traced = Enum.any?(surrounding_points, &(&1 in traced_points))
 
     empty_tile and !in_traced and !any_surrounding_traced
   end
 
-  def carve_doors(%__MODULE__{map: data, width: width, height: height} = map) do
+  def carve_doors(%__MODULE__{map: data} = map) do
     data
     |> List.flatten()
     |> Enum.flat_map(fn tile ->
       case tile do
         %Wall{position: position} ->
-          surrounding_points = surrounding_points(position, {width, height})
+          surrounding_points = surrounding_points(position, map)
 
           for {a, b} <- combinations(surrounding_points),
               %mod_a{id: a_id} = get(map, a),
@@ -155,8 +168,8 @@ defmodule ExRogue.Map do
     end)
   end
 
-  def remove_dead_ends(%__MODULE__{width: width, height: height} = map) do
-    iterate_region(map, {0, 0}, {width, height}, fn map, point ->
+  def remove_dead_ends(%__MODULE__{top_left: top_left, bottom_right: bottom_right} = map) do
+    iterate_region(map, top_left, bottom_right, fn map, point ->
       case is_dead_end?(map, point) do
         true ->
           map = remove_dead_end(map, point)
@@ -168,12 +181,12 @@ defmodule ExRogue.Map do
     end)
   end
 
-  def remove_dead_end(%__MODULE__{width: width, height: height} = map, point) do
+  def remove_dead_end(%__MODULE__{} = map, point) do
     map = update(map, point, %Wall{id: 0, position: point})
 
     next =
       point
-      |> surrounding_points({width, height})
+      |> surrounding_points(map)
       |> Enum.find(fn point ->
         tile = get(map, point)
 
@@ -199,10 +212,10 @@ defmodule ExRogue.Map do
     end
   end
 
-  def is_dead_end?(%__MODULE__{width: width, height: height} = map, point) do
+  def is_dead_end?(%__MODULE__{} = map, point) do
     case get(map, point) do
       %str{} when str == Hall or str == Door ->
-        surrounding_points = surrounding_points(point, {width, height})
+        surrounding_points = surrounding_points(point, map)
 
         walls =
           surrounding_points
@@ -235,7 +248,7 @@ defmodule ExRogue.Map do
     end ++ combinations(tail)
   end
 
-  def surrounding_points({x, y}, {max_x, max_y}) do
+  def surrounding_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
     points = [
       {x, y - 1},
       {x - 1, y},
@@ -244,15 +257,15 @@ defmodule ExRogue.Map do
     ]
 
     for {nx, ny} <- points,
-        nx != 0,
-        ny != 0,
-        nx != max_x,
-        ny != max_y do
+        nx >= 0,
+        ny >= 0,
+        nx <= max_x,
+        ny <= max_y do
       {nx, ny}
     end
   end
 
-  def find_empty(%__MODULE__{width: width, height: height, map: data}) do
+  def find_empty(%__MODULE__{map: data}) do
     data
     |> Enum.with_index()
     |> Enum.find_value(fn {row, ridx} ->
@@ -261,16 +274,12 @@ defmodule ExRogue.Map do
         |> Enum.with_index()
         |> Enum.find_value(fn {x, cidx} ->
           case {x, cidx} do
-            {_, 0} -> false
-            {_, ^width} -> false
             {nil, _} -> cidx
             _ -> false
           end
         end)
 
       case {cidx, ridx} do
-        {_, 0} -> false
-        {_, ^height} -> false
         {nil, _} -> false
         {cidx, _} -> {cidx, ridx}
       end
@@ -279,14 +288,12 @@ defmodule ExRogue.Map do
 
   defp do_place_room(%__MODULE__{} = map, _size, _, 0), do: map
 
-  defp do_place_room(%__MODULE__{width: map_width, height: map_height} = map, size, id, attempts) do
-    # +2 for walls
-    width = Enum.random(1..floor(size / 2)) + 2
-    # +2 for walls
-    height = floor(size / width) + 2
+  defp do_place_room(%__MODULE__{bottom_right: {max_x, max_y}} = map, size, id, attempts) do
+    width = Enum.random(2..floor(size / 2))
+    height = floor(size / width)
 
-    x_max = map_width - width - 1
-    y_max = map_height - height - 1
+    x_max = max_x - width - 1
+    y_max = max_y - height - 1
 
     left = Enum.random(1..x_max)
     right = left + width - 1
@@ -325,9 +332,9 @@ defmodule ExRogue.Map do
     end
   end
 
-  def place_walls(%__MODULE__{width: width, height: height} = map, points, id) do
+  def place_walls(%__MODULE__{} = map, points, id) do
     points
-    |> Enum.flat_map(&adjacent_points(&1, {width, height}))
+    |> Enum.flat_map(&adjacent_points(&1, map))
     |> Enum.uniq()
     |> Enum.filter(fn point ->
       is_nil(get(map, point))
@@ -337,14 +344,14 @@ defmodule ExRogue.Map do
     end)
   end
 
-  defp adjacent_points({x, y}, {max_x, max_y}) do
+  defp adjacent_points({x, y}, %__MODULE__{bottom_right: {max_x, max_y}}) do
     for nx <- (x - 1)..(x + 1),
         ny <- (y - 1)..(y + 1),
-        nx != 0,
-        ny != 0,
+        nx >= 0,
+        ny >= 0,
         {nx, ny} != {x, y},
-        nx != max_x,
-        ny != max_y do
+        nx <= max_x,
+        ny <= max_y do
       {nx, ny}
     end
   end
@@ -405,10 +412,10 @@ defimpl Inspect, for: ExRogue.Map do
   alias ExRogue.Map
   alias ExRogue.Map.Tile.{Door, Hall, Room, Wall}
 
-  def inspect(%Map{width: width, map: map}, _opts) do
+  def inspect(%Map{map: map, bottom_right: {max_x, _}}, _opts) do
     data =
       [
-        String.duplicate("_", width + 2),
+        String.duplicate("_", max_x + 2),
         for row <- map do
           col_string =
             for col <- row, into: "" do
@@ -423,7 +430,7 @@ defimpl Inspect, for: ExRogue.Map do
 
           Enum.join(["|", col_string, "|"])
         end,
-        String.duplicate("_", width + 2)
+        String.duplicate("_", max_x + 2)
       ]
       |> List.flatten()
 
