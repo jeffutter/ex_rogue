@@ -36,7 +36,7 @@ defmodule ExRogue.Map do
   @type tile :: Door.t() | Hall.t() | Room.t() | Wall.t()
 
   # Public Functions
-  @spec build(keyword) :: {:ok, t()} | {:error, atom}
+  @spec build(keyword) :: t()
   def build(options \\ []) do
     width = Keyword.get(options, :width, 50)
     height = Keyword.get(options, :height, 30)
@@ -47,6 +47,7 @@ defmodule ExRogue.Map do
     |> carve_halls()
     |> carve_doors()
     |> remove_dead_ends()
+    |> remove_extra_walls()
   end
 
   @spec new(integer, integer) :: t()
@@ -131,7 +132,20 @@ defmodule ExRogue.Map do
     end)
   end
 
-  @spec remove_dead_ends(t()) :: {:ok, t()} | {:error, atom}
+  @spec place_walls(t(), list(point), integer) :: t()
+  def place_walls(%__MODULE__{} = map, points, id) do
+    points
+    |> Enum.flat_map(&adjacent_points(&1, map))
+    |> Enum.uniq()
+    |> Enum.filter(fn point ->
+      is_nil(get(map, point))
+    end)
+    |> Enum.reduce(map, fn point, map ->
+      update(map, point, %Wall{id: id, position: point})
+    end)
+  end
+
+  @spec remove_dead_ends(t()) :: t()
   def remove_dead_ends(%__MODULE__{top_left: top_left, bottom_right: bottom_right} = map) do
     top_left
     |> points_for_region(bottom_right)
@@ -178,16 +192,26 @@ defmodule ExRogue.Map do
     end
   end
 
-  @spec place_walls(t(), list(point), integer) :: t()
-  def place_walls(%__MODULE__{} = map, points, id) do
-    points
-    |> Enum.flat_map(&adjacent_points(&1, map))
-    |> Enum.uniq()
-    |> Enum.filter(fn point ->
-      is_nil(get(map, point))
-    end)
+  @spec remove_extra_walls(t()) :: t()
+  def remove_extra_walls(%__MODULE__{top_left: top_left, bottom_right: bottom_right} = map) do
+    top_left
+    |> points_for_region(bottom_right)
     |> Enum.reduce(map, fn point, map ->
-      update(map, point, %Wall{id: id, position: point})
+      adjacent_points = adjacent_points(point, map)
+
+      walls =
+        Enum.filter(adjacent_points, fn point ->
+          case get(map, point) do
+            %Wall{} -> true
+            nil -> true
+            _ -> false
+          end
+        end)
+
+      case length(adjacent_points) - length(walls) do
+        0 -> update(map, point, nil)
+        _ -> map
+      end
     end)
   end
 
